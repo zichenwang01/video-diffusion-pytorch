@@ -1,24 +1,8 @@
-![machine imagined fireworks](./fireworks.webp)
-
-*these fireworks do not exist*
-
 ## Video Diffusion - Pytorch
 
 Text to video, it is happening! <a href="https://video-diffusion.github.io/">Official Project Page</a>
 
 Implementation of <a href="https://arxiv.org/abs/2204.03458">Video Diffusion Models</a>, <a href="http://www.jonathanho.me/">Jonathan Ho</a>'s new paper extending DDPMs to Video Generation - in Pytorch. It uses a special space-time factored U-net, extending generation from 2d images to 3d videos
-
-<img src="./3d-unet.png" width="500px"></img>
-
-## Status
-
-14k for difficult moving mnist (converging much faster and better than <a href="https://wandb.ai/lucidrains/nuwa-moving-mnist/reports/moving-mnist-nuwa--VmlldzoxNjk3MjI3?accessToken=cx03lswmr4bxj9dhrzzm5c3xebdmfq28a4dqzsoq9n89by6ppofukq7bxp19078j">NUWA</a>) - wip
-
-<img src="./samples/moving-mnist.gif" width="250px">
-
-The above experiments are possible only due to resources provided by <a href="https://stability.ai/">Stability.ai</a>
-
-Any new developments for text-to-video synthesis will be centralized at <a href="https://github.com/lucidrains/imagen-pytorch#text-to-video-ongoing-research">Imagen-pytorch</a>
 
 ## Install
 
