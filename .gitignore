@@ -127,3 +127,13 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# custom added folders
+data/
+results/
+samples/
+
+# custom training files
+train_script.sh 
+training.err
+training.out

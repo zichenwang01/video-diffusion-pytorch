@@ -823,6 +823,11 @@ class Dataset(data.Dataset):
         self.channels = channels
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
 
+        print("folder", folder)
+        print("paths", self.paths)
+        for file in Path(folder).rglob('*.gif'):
+            print(file)
+        
         self.cast_num_frames_fn = partial(cast_num_frames, frames = num_frames) if force_num_frames else identity
 
         self.transform = T.Compose([
