@@ -6,6 +6,9 @@ import torch.nn.functional as F
 from functools import partial
 
 from torch.utils import data
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+
 from pathlib import Path
 from torch.optim import Adam
 from torchvision import transforms as T, utils
@@ -27,6 +30,9 @@ def exists(x):
 
 def noop(*args, **kwargs):
     pass
+
+def print_log(s):
+    print(s)
 
 def is_odd(n):
     return (n % 2) == 1
@@ -586,6 +592,7 @@ class GaussianDiffusion(nn.Module):
         # register buffer helper function that casts float64 to float32
 
         register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
+        # register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32).to(self.device))
 
         register_buffer('betas', betas)
         register_buffer('alphas_cumprod', alphas_cumprod)
@@ -850,6 +857,7 @@ class Dataset(data.Dataset):
 class Trainer(object):
     def __init__(
         self,
+        rank, world_size,
         diffusion_model,
         folder,
         *,
@@ -864,10 +872,12 @@ class Trainer(object):
         update_ema_every = 10,
         save_and_sample_every = 1000,
         results_folder = './results',
-        num_sample_rows = 4,
+        num_sample_rows = 2,
         max_grad_norm = None
     ):
         super().__init__()
+        self.rank = rank
+        self.world_size = world_size
         self.model = diffusion_model
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
@@ -890,7 +900,9 @@ class Trainer(object):
         print(f'found {len(self.ds)} videos as gif files at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True))
+        self.sampler = DistributedSampler(self.ds, num_replicas=self. world_size, rank=rank)
+        self.dl = cycle(DataLoader(self.ds, batch_size = train_batch_size, sampler=self.sampler, pin_memory=True))
+        
         self.opt = Adam(diffusion_model.parameters(), lr = train_lr)
 
         self.step = 0
@@ -946,7 +958,8 @@ class Trainer(object):
 
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
-                data = next(self.dl).cuda()
+                # data = next(self.dl).cuda()
+                data = next(self.dl).to(self.rank)
 
                 with autocast(enabled = self.amp):
                     loss = self.model(
@@ -957,8 +970,10 @@ class Trainer(object):
 
                     self.scaler.scale(loss / self.gradient_accumulate_every).backward()
 
-                print(f'{self.step}: {loss.item()}')
+                if i == 0 and self.rank == 0:
+                    print(f'{self.step}: {loss.item()}')
 
+            # log += {'loss at st
             log = {'loss': loss.item()}
 
             if exists(self.max_grad_norm):
