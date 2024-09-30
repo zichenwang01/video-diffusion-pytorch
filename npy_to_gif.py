@@ -35,6 +35,9 @@ for seed_folder in Path(npy_folder).glob("seed*"):
     # Check number of frames
     assert video.shape[0] == 320
     
+    # Normalize the video tensor to [0, 1]
+    video = (video - video.min()) / (video.max() - video.min())
+    
     # Save the video tensor as a .gif file
     video = video.unsqueeze(0)
-    video_tensor_to_gif(video, f'data/ns_f=320/video_{seed_folder.name}.gif')
+    video_tensor_to_gif(video, f'data/kf_f=320/video_{seed_folder.name}.gif')

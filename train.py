@@ -10,11 +10,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # Importing custom libraries
 from video_diffusion_pytorch import *
 
-# constants
+# Global variables
 results_folder = f'results/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}/'
 
-# data_folder = '/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/data/ns_Re=1000_f=20'
-data_folder = '/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/data/ns_f=5'
+data_folder = '/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/data/kf_f=10'
+
+image_size = 128
+
+num_frames = 10
 
 # Function to set up the distributed environment
 def setup(rank, world_size):
@@ -43,8 +46,8 @@ def train_ddp(rank, world_size):
     # Create the diffusion model and move it to the correct device
     diffusion = GaussianDiffusion(
         model,
-        image_size=128,
-        num_frames=5,
+        image_size=image_size,
+        num_frames=num_frames,
         timesteps=1000,   # number of steps
         loss_type='l1'    # L1 or L2
     ).to(rank)  # Move diffusion to the correct device
@@ -65,9 +68,9 @@ def train_ddp(rank, world_size):
         rank, world_size,
         diffusion_ddp.module,
         data_folder,                  # Path to your data
-        train_batch_size=8,           # Per-GPU batch size
-        train_lr=1e-4 / 4,
-        save_and_sample_every=100,
+        train_batch_size=16,           # Per-GPU batch size
+        train_lr=1e-4 / 2,
+        save_and_sample_every=500,
         train_num_steps=500000,       # Total training steps
         gradient_accumulate_every=2,  # Gradient accumulation steps
         ema_decay=0.995,              # Exponential moving average decay
