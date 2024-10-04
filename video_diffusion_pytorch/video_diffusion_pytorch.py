@@ -895,8 +895,8 @@ class Trainer(object):
         self.rank = rank
         self.world_size = world_size
         self.model = diffusion_model
-        self.ema = EMA(ema_decay)
-        self.ema_model = copy.deepcopy(self.model)
+        self.ema = EMA(ema_decay) # exponential moving average
+        self.ema_model = copy.deepcopy(self.model) 
         self.update_ema_every = update_ema_every
 
         self.step_start_ema = step_start_ema

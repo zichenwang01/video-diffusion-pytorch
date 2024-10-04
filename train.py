@@ -48,6 +48,7 @@ def train_ddp(rank, world_size):
         model,
         image_size=image_size,
         num_frames=num_frames,
+        channels=1,      # Number of channels in the input
         timesteps=1000,   # number of steps
         loss_type='l1'    # L1 or L2
     ).to(rank)  # Move diffusion to the correct device
@@ -84,10 +85,20 @@ def train_ddp(rank, world_size):
     # Cleanup after training
     cleanup()
 
+# Save global variables
+def save_global_vars():
+    global_vars = {
+        'results_folder': results_folder,
+        'data_folder': data_folder,
+        'image_size': image_size,
+        'num_frames': num_frames
+    }
+    torch.save(global_vars, results_folder + 'configs.pt')
+
 # Main function for spawning processes
 def main():
+    save_global_vars()
     world_size = torch.cuda.device_count()  # Number of GPUs available
-    print(f"Running on {world_size} GPUs")
     mp.spawn(train_ddp, args=(world_size,), nprocs=world_size, join=True)
 
 if __name__ == '__main__':
