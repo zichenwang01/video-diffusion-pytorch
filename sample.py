@@ -7,6 +7,12 @@ import torch
 
 from video_diffusion_pytorch.video_diffusion_pytorch import *
 
+# Number of samples to generate
+num_samples = 4
+
+# Number of timesteps for diffusion
+num_steps = 1000
+
 def load_model(model_path, device):
     # Load the model checkpoint
     checkpoint = torch.load(model_path, map_location=device)
@@ -48,10 +54,11 @@ def load_model(model_path, device):
 
 def generate_samples(
     model, ema_model,
-    num_samples, save_path, device
+    num_samples, num_steps,
+    save_path, device
 ):
     # Generate samples
-    videos = ema_model.sample(batch_size=num_samples)
+    videos = ema_model.sample(batch_size=num_samples, num_steps=num_steps)
     print(videos.shape)
     
     # Save the video tensor 
@@ -69,9 +76,6 @@ def main():
     save_path = f'samples/{datetime.now().strftime("%Y-%m-%d")}/'
     os.makedirs(save_path, exist_ok=True)
     
-    # Number of samples to generate
-    num_samples = 4
-    
     # Device to run the model on
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -82,7 +86,8 @@ def main():
     # Generate and save samples
     generate_samples(
         model, ema_model,
-        num_samples, save_path, device
+        num_samples, num_steps,
+        save_path, device
     )
 
 if __name__ == '__main__':

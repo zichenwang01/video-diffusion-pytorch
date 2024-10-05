@@ -691,18 +691,81 @@ class GaussianDiffusion(nn.Module):
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.inference_mode()
-    def p_sample_loop(self, shape, cond = None, cond_scale = 1.):
+    def p_sample_loop(self, 
+        shape, num_steps,
+        cond = None, cond_scale = 1.
+    ):
         """ Reverse sampling loop """
         device = self.betas.device
         b = shape[0]
+        
         img = torch.randn(shape, device=device)
-        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
+        for i in tqdm(reversed(range(0, num_steps)), desc='sampling loop time step', total=num_steps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long), cond = cond, cond_scale = cond_scale)
 
         return unnormalize_img(img)
 
     @torch.inference_mode()
-    def sample(self, cond = None, cond_scale = 1., batch_size = 16):
+    def dps_sample_loop(self, 
+        shape, num_steps, observations, 
+        obs_loss_fn, pde_loss_fn,
+        obs_coeff=1.0, pde_coeff=1.0
+    ):
+        """ Reverse sampling loop using DPS """
+
+        device = self.betas.device
+        b = shape[0]
+        
+        # Initialize with random noise
+        img = torch.randn(shape, device=device)
+
+        # Time step discretization and configuration
+        step_indices = torch.arange(num_steps, dtype=torch.float64, device=device)
+        t_steps = self.sigma_max ** (1 / self.rho) + step_indices / (num_steps - 1) * (self.sigma_min ** (1 / self.rho) - self.sigma_max ** (1 / self.rho))
+        t_steps = (t_steps ** self.rho).clamp(min=self.sigma_min, max=self.sigma_max)
+        
+        # Progress bar
+        pbar = tqdm(reversed(range(0, self.num_timesteps)), desc='DPS sampling', total=self.num_timesteps)
+        
+        # Main reverse sampling loop
+        for i in pbar:
+            # Current time step t
+            t = torch.full((b,), i, device=device, dtype=torch.long)
+            
+            # Compute the gradient of the loss function with respect to the image
+            img.requires_grad = True
+
+            # Call diffusion model
+            model_mean, _, model_log_variance = self.p_mean_variance(x=img, t=t)
+
+            # Observation loss
+            obs_loss = obs_loss_fn(img, observations) 
+            obs_grad = torch.autograd.grad(outputs=obs_loss, inputs=img, retain_graph=True)[0]
+
+            # PDE loss
+            pde_loss = pde_loss_fn(img, device) 
+            pde_grad = torch.autograd.grad(outputs=pde_loss, inputs=img, retain_graph=True)[0]
+
+            # Combine the gradients with some scaling factors (adjust as needed)
+            combined_grad = obs_coeff * obs_grad + pde_coeff * pde_grad
+
+            # DPS correction term (gradient step)
+            img = img - combined_grad
+
+            # Recompute the noise-free sample
+            noise = torch.randn_like(img)
+            noise_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(img.shape) - 1)))
+            img = model_mean + noise_mask * (0.5 * model_log_variance).exp() * noise
+        
+        # Final output image after reverse sampling
+        return unnormalize_img(img)
+
+    @torch.inference_mode()
+    def sample(self, 
+        batch_size = 16, num_steps = None,      
+        cond = None, cond_scale = 1., 
+        is_dps = False, **kargs
+    ):
         """ Main sampling function """
         device = next(self.denoise_fn.parameters()).device
         # check conditioning
@@ -713,7 +776,22 @@ class GaussianDiffusion(nn.Module):
         channels = self.channels
         num_frames = self.num_frames
         image_size = self.image_size
-        return self.p_sample_loop((batch_size, channels, num_frames, image_size, image_size), cond = cond, cond_scale = cond_scale)
+        
+        shape = (batch_size, channels, num_frames, image_size, image_size)
+        num_steps = default(num_steps, self.num_timesteps)
+        if is_dps:
+            return self.dps_sample_loop(
+                shape, num_steps,
+                observations = kargs['observations'],
+                cond = cond, cond_scale = cond_scale,
+                obs_loss_fn = kargs['obs_loss_fn'], 
+                pde_loss_fn = kargs['pde_loss_fn']
+            )
+        else:
+            return self.p_sample_loop(
+                shape, num_steps, 
+                cond = cond, cond_scale = cond_scale
+            )
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
