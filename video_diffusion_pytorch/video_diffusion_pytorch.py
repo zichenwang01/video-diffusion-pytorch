@@ -13,7 +13,10 @@ from pathlib import Path
 from torch.optim import Adam
 from torchvision import transforms as T, utils
 from torch.cuda.amp import autocast, GradScaler
+
+import numpy as np
 from PIL import Image
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from einops import rearrange
@@ -705,62 +708,60 @@ class GaussianDiffusion(nn.Module):
 
         return unnormalize_img(img)
 
-    @torch.inference_mode()
     def dps_sample_loop(self, 
-        shape, num_steps, observations, 
+        shape, num_steps, 
+        mask, observations, 
         obs_loss_fn, pde_loss_fn,
         obs_coeff=1.0, pde_coeff=1.0
     ):
         """ Reverse sampling loop using DPS """
-
         device = self.betas.device
         b = shape[0]
         
         # Initialize with random noise
         img = torch.randn(shape, device=device)
-
-        # Time step discretization and configuration
-        step_indices = torch.arange(num_steps, dtype=torch.float64, device=device)
-        t_steps = self.sigma_max ** (1 / self.rho) + step_indices / (num_steps - 1) * (self.sigma_min ** (1 / self.rho) - self.sigma_max ** (1 / self.rho))
-        t_steps = (t_steps ** self.rho).clamp(min=self.sigma_min, max=self.sigma_max)
         
         # Progress bar
-        pbar = tqdm(reversed(range(0, self.num_timesteps)), desc='DPS sampling', total=self.num_timesteps)
+        pbar = tqdm(reversed(range(0, num_steps)), desc='DPS sampling', total=num_steps)
         
         # Main reverse sampling loop
         for i in pbar:
             # Current time step t
             t = torch.full((b,), i, device=device, dtype=torch.long)
+
+            with torch.enable_grad():
+                # Copy img for gradient computation
+                img_copy = img.detach().clone()
+                img_copy.requires_grad = True
+
+                # Observation loss
+                obs_loss = obs_loss_fn(img_copy, mask, observations) 
+                # print('obs_coeff:', obs_coeff)
+                # print('obs_loss:', obs_coeff * obs_loss)
+                obs_grad = torch.autograd.grad(outputs=obs_loss, inputs=img_copy, retain_graph=True)[0]
+
+                # # PDE loss
+                # pde_loss = pde_loss_fn(img_copy) 
+                # print(pde_loss)
+                # pde_grad = torch.autograd.grad(outputs=pde_loss, inputs=img_copy, retain_graph=True)[0]
+
+                # Combine the gradients with some scaling factors (adjust as needed)
+                combined_grad = obs_coeff * obs_grad #+ pde_coeff * pde_grad
             
-            # Compute the gradient of the loss function with respect to the image
-            img.requires_grad = True
+            with torch.no_grad():
+                # Call diffusion model
+                model_mean, _, model_log_variance = self.p_mean_variance(x=img, t=t, clip_denoised=True)
 
-            # Call diffusion model
-            model_mean, _, model_log_variance = self.p_mean_variance(x=img, t=t)
+                # Recompute the noise-free sample
+                noise = torch.randn_like(img)
+                noise_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(img.shape) - 1)))
+                img = model_mean + noise_mask * (0.5 * model_log_variance).exp() * noise
+                
+                # DPS correction term (gradient step)
+                img = img - combined_grad
 
-            # Observation loss
-            obs_loss = obs_loss_fn(img, observations) 
-            obs_grad = torch.autograd.grad(outputs=obs_loss, inputs=img, retain_graph=True)[0]
-
-            # PDE loss
-            pde_loss = pde_loss_fn(img, device) 
-            pde_grad = torch.autograd.grad(outputs=pde_loss, inputs=img, retain_graph=True)[0]
-
-            # Combine the gradients with some scaling factors (adjust as needed)
-            combined_grad = obs_coeff * obs_grad + pde_coeff * pde_grad
-
-            # DPS correction term (gradient step)
-            img = img - combined_grad
-
-            # Recompute the noise-free sample
-            noise = torch.randn_like(img)
-            noise_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(img.shape) - 1)))
-            img = model_mean + noise_mask * (0.5 * model_log_variance).exp() * noise
-        
-        # Final output image after reverse sampling
         return unnormalize_img(img)
 
-    @torch.inference_mode()
     def sample(self, 
         batch_size = 16, num_steps = None,      
         cond = None, cond_scale = 1., 
@@ -782,10 +783,12 @@ class GaussianDiffusion(nn.Module):
         if is_dps:
             return self.dps_sample_loop(
                 shape, num_steps,
+                mask = kargs['mask'], 
                 observations = kargs['observations'],
-                cond = cond, cond_scale = cond_scale,
                 obs_loss_fn = kargs['obs_loss_fn'], 
-                pde_loss_fn = kargs['pde_loss_fn']
+                pde_loss_fn = kargs['pde_loss_fn'],
+                obs_coeff = kargs['obs_coeff'],
+                pde_coeff = kargs['pde_coeff']
             )
         else:
             return self.p_sample_loop(
@@ -872,12 +875,39 @@ def seek_all_images(img, channels = 3):
             break
         i += 1
 
+
+def tensor_to_image(tensor, path, method='jet'):
+    tensor = tensor.cpu()
+    if method == 'grayscale':
+        img = T.ToPILImage()(tensor[0])
+    elif method == 'viridis':
+        img = plt.cm.viridis(tensor[0])
+        img = T.ToPILImage()(img)
+    elif method == 'jet':
+        img = plt.cm.jet(tensor[0])
+        img = T.ToPILImage()(img)
+    img.save(path)
+    return img
+
 # tensor of shape (channels, frames, height, width) -> gif
 
-def video_tensor_to_gif(tensor, path, duration = 120, loop = 0, optimize = True):
-    images = map(T.ToPILImage(), tensor.unbind(dim = 1))
+def video_tensor_to_gif(tensor, path, duration = 120, loop = 0, optimize = True, method='jet'):
+    tensor = tensor.cpu()
+    if method == 'grayscale':
+        images = list(map(T.ToPILImage(), tensor.unbind(dim=1)))
+    elif method == 'viridis':
+        images = []
+        for frame in tensor.unbind(dim=1):
+            frame = plt.cm.viridis(frame[0])
+            images.append(T.ToPILImage()(frame))
+    elif method == 'jet':
+        images = []
+        for frame in tensor.unbind(dim=1):
+            frame = plt.cm.jet(frame[0])
+            images.append(T.ToPILImage()(frame))
+    
     first_img, *rest_imgs = images
-    first_img.save(path, save_all = True, append_images = rest_imgs, duration = duration, loop = loop, optimize = optimize)
+    first_img.save(path, save_all=True, append_images=rest_imgs, duration=duration, loop=loop, optimize=optimize)
     return images
 
 # gif -> (channels, frame, height, width) tensor
