@@ -134,6 +134,6 @@ results/
 samples/
 
 # custom training files
-train_script.sh 
-training.err
-training.out
+*.sh
+*.out
+*.err

@@ -8,7 +8,6 @@ from functools import partial
 from torch.utils import data
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 from pathlib import Path
 from torch.optim import Adam
@@ -884,6 +883,8 @@ class GaussianDiffusion(nn.Module):
 
         self.use_dynamic_thres = use_dynamic_thres
         self.dynamic_thres_percentile = dynamic_thres_percentile
+        
+        print(1)
 
     def q_mean_variance(self, x_start, t):
         """ Compute mean, var of q(x_t | x_{t-1}) = N(mean, variance) """
@@ -989,81 +990,10 @@ class GaussianDiffusion(nn.Module):
                 img_copy.requires_grad = True
 
                 # Observation loss
-                _, obs_loss = obs_loss_fn(img_copy, mask, observations) 
-                obs_coeff *= i / num_steps # linearly decay 
-                # obs_coeff *= torch.exp(torch.tensor(-i / num_steps)) # exp
+                obs_loss = obs_loss_fn(img_copy, mask, observations) 
+                # print('obs_coeff:', obs_coeff)
+                # print('obs_loss:', obs_coeff * obs_loss)
                 obs_grad = torch.autograd.grad(outputs=obs_loss, inputs=img_copy, retain_graph=True)[0]
-                # print("obs_coeff: ", obs_coeff)
-                print("obs_loss: ", obs_loss)
-
-                # PDE loss
-                if i > pde_start_ratio * num_steps:
-                    pde_loss = pde_loss_fn(img_copy) 
-                    pde_grad = torch.autograd.grad(outputs=pde_loss, inputs=img_copy, retain_graph=True)[0]
-                else:
-                    pde_grad = 0
-
-                # Combine the gradients with some scaling factors (adjust as needed)
-                combined_grad = obs_coeff * obs_grad + pde_coeff * pde_grad
-            
-            with torch.no_grad():
-                # Call diffusion model
-                model_mean, _, model_log_variance = self.p_mean_variance(x=img, t=t, clip_denoised=True)
-
-                # Recompute the noise-free sample
-                noise = torch.randn_like(img)
-                noise_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(img.shape) - 1)))
-                img = model_mean + noise_mask * (0.5 * model_log_variance).exp() * noise
-                
-                # DPS correction term (gradient step)
-                img = img - combined_grad
-
-        return unnormalize_img(img)
-
-    def dps_sample_loop2(self, 
-        shape, num_steps, 
-        mask, observations, 
-        obs_loss_fn, pde_loss_fn, pde_start_ratio=0.8,
-        obs_coeff=1.0, pde_coeff=1.0
-    ):
-        """ Reverse sampling loop using DPS """
-        self.__init__(
-            denoise_fn=self.denoise_fn,
-            image_size=self.image_size,
-            num_frames=self.num_frames,
-            text_use_bert_cls=self.text_use_bert_cls,
-            channels=self.channels,
-            timesteps=num_steps,
-            loss_type=self.loss_type,
-            use_dynamic_thres=self.use_dynamic_thres,
-            dynamic_thres_percentile=self.dynamic_thres_percentile
-        )
-        
-        
-        device = self.betas.device
-        b = shape[0]
-        
-        # Initialize with random noise
-        img = torch.randn(shape, device=device)
-        
-        # Progress bar
-        pbar = tqdm(reversed(range(0, num_steps)), desc='DPS sampling', total=num_steps)
-        
-        # Main reverse sampling loop
-        for i in pbar:
-            # Current time step t
-            t = torch.full((b,), i, device=device, dtype=torch.long)
-
-            with torch.enable_grad():
-                # Copy img for gradient computation
-                img_copy = img.detach().clone()
-                img_copy.requires_grad = True
-
-                # Observation loss
-                _, obs_loss = obs_loss_fn(img_copy, mask, observations) 
-                obs_grad = torch.autograd.grad(outputs=obs_loss, inputs=img_copy, retain_graph=True)[0]
-                # print("obs_coeff: ", obs_coeff)
-                print("obs_loss: ", obs_loss)
 
                 # PDE loss
                 if i > pde_start_ratio * num_steps:
@@ -1281,6 +1211,11 @@ class Dataset(data.Dataset):
         self.image_size = image_size
         self.channels = channels
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+
+        print("folder", folder)
+        print("paths", self.paths)
+        for file in Path(folder).rglob('*.gif'):
+            print(file)
         
         self.cast_num_frames_fn = partial(cast_num_frames, frames = num_frames) if force_num_frames else identity
 
@@ -1319,7 +1254,7 @@ class TrainerDDP(object):
         update_ema_every = 10,
         save_and_sample_every = 1000,
         results_folder = './results',
-        num_sample_rows = 1,
+        num_sample_rows = 2,
         max_grad_norm = None
     ):
         super().__init__()
@@ -1329,7 +1264,6 @@ class TrainerDDP(object):
         self.ema = EMA(ema_decay) # exponential moving average
         self.ema_model = copy.deepcopy(self.model) 
         self.update_ema_every = update_ema_every
-        self.model = DDP(self.model, device_ids=[rank])
 
         self.step_start_ema = step_start_ema
         self.save_and_sample_every = save_and_sample_every
@@ -1339,11 +1273,11 @@ class TrainerDDP(object):
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
 
-        # image_size = diffusion_model.image_size
+        image_size = diffusion_model.image_size
         channels = diffusion_model.channels
         num_frames = diffusion_model.num_frames
 
-        self.ds = Dataset(folder, self.image_size, channels = channels, num_frames = num_frames)
+        self.ds = Dataset(folder, image_size, channels = channels, num_frames = num_frames)
 
         print(f'found {len(self.ds)} videos as gif files at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
@@ -1366,7 +1300,7 @@ class TrainerDDP(object):
         self.reset_parameters()
 
     def reset_parameters(self):
-        self.ema_model.load_state_dict(self.model.module.state_dict())
+        self.ema_model.load_state_dict(self.model.state_dict())
 
     def step_ema(self):
         if self.step < self.step_start_ema:
@@ -1407,6 +1341,8 @@ class TrainerDDP(object):
     ):
         assert callable(log_fn)
 
+        print(1)
+
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 # data = next(self.dl).cuda()
@@ -1441,7 +1377,7 @@ class TrainerDDP(object):
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
-            if self.rank == 0 and self.step % self.save_and_sample_every == 0:
+            if self.rank == 0 and self.step != 0 and self.step % self.save_and_sample_every == 0:
                 milestone = self.step // self.save_and_sample_every
                 num_samples = self.num_sample_rows ** 2
                 batches = num_to_groups(num_samples, self.batch_size)
@@ -1457,7 +1393,7 @@ class TrainerDDP(object):
                 log = {**log, 'sample': video_path}
                 self.save(milestone, self.rank)
 
-            if self.rank == 1 and self.step % self.save_and_sample_every == 0:
+            if self.rank == 2 and self.step != 0 and self.step % self.save_and_sample_every == 0:
                 milestone = self.step // self.save_and_sample_every
                 num_samples = self.num_sample_rows ** 2
                 batches = num_to_groups(num_samples, self.batch_size)

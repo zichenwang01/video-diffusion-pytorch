@@ -8,7 +8,7 @@ import torch
 from video_diffusion_pytorch.video_diffusion_pytorch import *
 
 # Number of samples to generate
-num_samples = 4
+num_samples = 1
 
 # Number of timesteps for diffusion
 num_steps = 1000
@@ -27,7 +27,7 @@ def load_model(model_path, device):
     model = GaussianDiffusion(
         denoise_fn=unet,
         image_size=128,  # Example image size, adjust as needed
-        num_frames=10,  # Example number of frames, adjust as needed
+        num_frames=20,  # Example number of frames, adjust as needed
         channels=3,     # Number of channels in the input
         timesteps=1000,  # Number of timesteps
         loss_type='l1',  # Loss type
@@ -38,11 +38,29 @@ def load_model(model_path, device):
     # Initialize the EMA model
     ema_model = copy.deepcopy(model)
     
+    # Remove 'module.' prefix from state_dict keys if present
+    state_dict = checkpoint['model']
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            new_state_dict[k[7:]] = v
+        else:
+            new_state_dict[k] = v
+    
     # Load the model state dict
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(new_state_dict)
     
     # Load the EMA model state dict
-    ema_model.load_state_dict(checkpoint['ema'])
+    ema_state_dict = checkpoint['ema']
+    new_ema_state_dict = {}
+    for k, v in ema_state_dict.items():
+        if k.startswith('module.'):
+            new_ema_state_dict[k[7:]] = v
+        else:
+            new_ema_state_dict[k] = v
+    
+    # Load the EMA model state dict
+    ema_model.load_state_dict(new_ema_state_dict)
     
     # Initialize the scaler
     scaler = GradScaler('cuda')
@@ -70,14 +88,19 @@ def generate_samples(
 
 def main():
     # Path to the model checkpoint
-    model_path = '/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/results/2024-09-30_22-27-47/model-25.pt'
+    model_idx = '15_1'
+    model_path = f'/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/results/kf2000_f=20/model-{model_idx}.pt'
+    # model_path = f'/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/results/kf_f=20/model-{model_idx}.pt'
     
     # Path to save the generated samples
-    save_path = f'samples/{datetime.now().strftime("%Y-%m-%d")}/'
+    # save_path = f'samples/{datetime.now().strftime("%Y-%m-%d")}/'
+    save_path = f'samples/kf2000_f=20_model-{model_idx}/'
     os.makedirs(save_path, exist_ok=True)
+    print(f"----- Saving samples to {save_path} -----")
     
     # Device to run the model on
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"----- Running on {device} -----")
     
     # Load the model
     model, ema_model, scaler = load_model(model_path, device)

@@ -40,4 +40,4 @@ for seed_folder in Path(npy_folder).glob("seed*"):
     
     # Save the video tensor as a .gif file
     video = video.unsqueeze(0)
-    video_tensor_to_gif(video, f'data/kf_f=320/video_{seed_folder.name}.gif')
+    video_tensor_to_gif(video, f'data/kf/video_{seed_folder.name}.gif')

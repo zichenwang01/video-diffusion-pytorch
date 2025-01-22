@@ -5,23 +5,21 @@ from pathlib import Path
 from datetime import datetime
 
 import torch
+import numpy as np
 
 from video_diffusion_pytorch.video_diffusion_pytorch import *
 
 # ----------------------------- GLOBAL VARIABLES ----------------------------- 
 
 # Path to the model checkpoint
-model_path = '/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/results/2024-09-30_22-27-47/model-25.pt'
+model_idx = 49
+model_path = f'/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/results/ns5s_f=5/model-{model_idx}.pt'
 
 # Path to the data
-data_path = '/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/data/kf_f=10/'
-
-# Path to save samples
-save_path = f'samples/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}/'
-os.makedirs(save_path, exist_ok=True)
+data_path = '/nfs/turbo/jjparkcv-turbo-large/zichen/video-diffusion-pytorch/data/ns5s_f=5_eval/'
 
 # Seed for gt data 
-data_seed = 0
+data_seed = 10001
 # seed = torch.randint(0, 1000, (1,)).item()
 
 # Seed for mask 
@@ -33,23 +31,45 @@ num_samples = 1
 # Number of timesteps for diffusion
 num_steps = 1000
 
+# Number of frames in the video
+num_frame = 5
+
 # Number of observations
 # num_obs = 800 # 5%
 # num_obs = 1600 # 10%
-num_obs = 3200 # 20%
+num_obs = 2400 # 15%
+# num_obs = 3200 # 20%
 # num_obs = 5000 # 30% 
 
-# Coefficients for the loss functions
-obs_coeff, pde_coeff = 6400.0, 1.0
+# Coefficient for the observation loss
+obs_coeff = 0.01
 
-# ------------------------------- DPS FUNCTIONS --------------------------------
+# Coefficient and starting point for the PDE loss
+pde_start = 1.5
+pde_coeff = 1
 
-def obs_loss(u, mask, observations, method='l1'):
+# Path to save samples
+# exp_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+exp_name = f'2_coeff/linear_non-scaled_obs_coeff={obs_coeff}'
+save_path = f'samples/{exp_name}/'
+os.makedirs(save_path, exist_ok=True)
+print(f"----- Saving samples to {save_path} -----")
+
+# ------------------------------- DPS FUNCTIONS -------------------------------
+
+# def obs_loss(u, mask, observations, method='l1'):
+#     """ Observation loss function """
+#     if method == 'l1':
+#         return torch.mean(torch.abs(u * mask - observations))
+#     elif method == 'l2':
+#         return torch.mean((u * mask - observations)**2)
+
+def obs_loss(u, mask, observations):
     """ Observation loss function """
-    if method == 'l1':
-        return torch.mean(torch.abs(u * mask - observations))
-    elif method == 'l2':
-        return torch.mean((u * mask - observations)**2)
+    residual = u * mask - observations
+    obs_step = obs_coeff / torch.norm(residual, 2)
+    obs_loss = torch.norm(residual, 2) ** 2
+    return obs_step, obs_loss
 
 def ns_loss(u):
     """ Navier-Stokes loss function """
@@ -58,7 +78,6 @@ def ns_loss(u):
     grid_step = 1 / (grid_res - 1)
     # Padding
     u_padded = torch.nn.functional.pad(u, (1, 1, 1, 1), 'constant', 0)
-    print(u_padded.shape)
     # Laplacian as loss
     loss = (u_padded[:, :, :-2, 1:-1] + u_padded[:, :, 2:, 1:-1] + 
            u_padded[:, :, 1:-1, :-2] + u_padded[:, :, 1:-1, 2:] - 
@@ -71,6 +90,13 @@ def ns_loss(u):
     loss[:, -1] = 0
     # Return the mean squared loss
     return torch.mean(loss**2)
+
+def eval_loss(u, gt):
+    """ Relative squared error of the full denoised video """
+    u = u.cpu().numpy()
+    gt = gt.cpu().numpy()
+    rse = np.sum((gt - u) ** 2) / np.sum(gt - np.mean(gt) ** 2) 
+    return rse
 
 def random_index(k, grid_size, seed, device):
     """ Randomly mask in k indices from a grid using PyTorch. """
@@ -132,7 +158,7 @@ def load_model(model_path, device):
     model = GaussianDiffusion(
         denoise_fn=unet,
         image_size=128,  # Example image size, adjust as needed
-        num_frames=10,  # Example number of frames, adjust as needed
+        num_frames=num_frame,  # Example number of frames, adjust as needed
         channels=3,     # Number of channels in the input
         timesteps=1000,  # Number of timesteps
         loss_type='l1',  # Loss type
@@ -143,17 +169,49 @@ def load_model(model_path, device):
     # Initialize the EMA model
     ema_model = copy.deepcopy(model)
     
+    # Remove 'module.' prefix from state_dict keys if present
+    state_dict = checkpoint['model']
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            new_state_dict[k[7:]] = v
+        else:
+            new_state_dict[k] = v
+    
     # Load the model state dict
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(new_state_dict)
     
     # Load the EMA model state dict
-    ema_model.load_state_dict(checkpoint['ema'])
+    ema_state_dict = checkpoint['ema']
+    new_ema_state_dict = {}
+    for k, v in ema_state_dict.items():
+        if k.startswith('module.'):
+            new_ema_state_dict[k[7:]] = v
+        else:
+            new_ema_state_dict[k] = v
+    
+    # Load the EMA model state dict
+    ema_model.load_state_dict(new_ema_state_dict)
     
     # Initialize the scaler
     scaler = GradScaler('cuda')
     
     # Load the scaler state dict
     scaler.load_state_dict(checkpoint['scaler'])
+    
+    # Change ema_model timestep
+    if ema_model.num_timesteps != num_steps:
+        ema_model.__init__(
+            denoise_fn=ema_model.denoise_fn,
+            image_size=ema_model.image_size,
+            num_frames=ema_model.num_frames,
+            channels=ema_model.channels,
+            timesteps=num_steps,
+            loss_type=ema_model.loss_type,
+            use_dynamic_thres=ema_model.use_dynamic_thres,
+            dynamic_thres_percentile=ema_model.dynamic_thres_percentile
+        )
+        ema_model = ema_model.to(device)
     
     return model, ema_model, scaler
 
@@ -164,9 +222,11 @@ def dps_samples(
 ):
     
     # Load gt video
-    gt_video = gif_to_tensor(data_path + f'video_seed{data_seed}.gif')
+    gt_video = gif_to_tensor(data_path + f'video_{data_seed}.gif')
+    # gt_video = gif_to_tensor(data_path + f'video_seed{data_seed}.gif')
     gt_video = gt_video.to(device)
     shape = gt_video.shape
+    # print(shape)
     
     # Normalize the gt video
     gt_video = normalize_img(gt_video)
@@ -186,25 +246,29 @@ def dps_samples(
         batch_size=num_samples, num_steps=num_steps, 
         is_dps=True, mask=mask, observations=observations, 
         obs_loss_fn=obs_loss, pde_loss_fn=ns_loss,
+        pde_start_ratio=pde_start,
         obs_coeff=obs_coeff, pde_coeff=pde_coeff,
     )
     
     # Save config 
+    gt_video = unnormalize_img(gt_video) 
     config = {
+        'model_idx': model_idx,
         'data_seed': data_seed,
         'mask_seed': mask_seed,
         'num_samples': num_samples,
         'num_steps': num_steps,
         'num_obs': num_obs,
         'obs_coeff': obs_coeff,
-        'pde_coeff': pde_coeff
+        'pde_coeff': pde_coeff,
+        'pde_start': pde_start,
+        'loss': float(eval_loss(videos[0], gt_video))
     }
     with open(save_path + 'config.json', 'w') as f:
         json.dump(config, f, indent=4)
     
     # Save tensors
-    gt_video = unnormalize_img(gt_video) # gt
-    torch.save(gt_video, save_path + f'gt_seed{data_seed}.pt')  
+    torch.save(gt_video, save_path + f'gt_seed{data_seed}.pt') # gt
     torch.save(mask, save_path + 'mask.pt') # mask
     observations = unnormalize_img(observations)
     torch.save(observations, save_path + 'obs.pt') # obs

@@ -25,5 +25,5 @@ for mat_path in Path(mat_folder).glob("*.mat"):
     # Save each video as a .gif file
     for video in videos:
         video = torch.tensor(video).unsqueeze(0)
-        video_tensor_to_gif(video, f'data/ns_Re=1000_f=20/video_{idx}.gif')
+        video_tensor_to_gif(video, f'data/kf/video_{idx}.gif')
         idx += 1
